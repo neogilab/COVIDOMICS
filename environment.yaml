@@ -1,0 +1,25 @@
+channels:
+- conda-forge
+- bioconda
+- rdonnelly
+- defaults
+
+dependencies:
+### Python
+- python>=3.8
+- jupyter_core
+- pandas
+- scipy
+- seaborn
+- matplotlib
+- nb_conda_kernels
+- numpy
+- pip
+- pip:
+    - datashader
+    - pca
+- rpy2
+- scipy
+- scikit-learn=0.23.2
+- statsmodels
+- umap-learn
