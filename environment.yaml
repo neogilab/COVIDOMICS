@@ -1,25 +1,34 @@
 channels:
 - conda-forge
-- bioconda
 - rdonnelly
+- bioconda
+- anaconda
+- r
 - defaults
 
 dependencies:
-### Python
-- python>=3.8
-- jupyter_core
-- pandas
-- scipy
-- seaborn
-- matplotlib
-- nb_conda_kernels
-- numpy
-- pip
-- pip:
-    - datashader
-    - pca
-- rpy2
-- scipy
-- scikit-learn=0.23.2
-- statsmodels
-- umap-learn
+  ### R
+- r-essentials
+- rstudio=1.1.456
+
+  ## aditional R packages
+- bioconductor-clusterprofiler=3.18.0
+- bioconductor-pathview=1.30.0
+- bioconductor-piano=2.6.0
+- bioconductor-reactomepa
+- bioconductor-rsbml=2.48.0
+- libsbml=5.18.0
+- r-corrplot
+- r-devtools
+- r-dplyr=1.0.2
+- r-dt
+- r-magrittr=1.5 ## version 2.0 is bugged
+- r-msigdbr=7.2.1
+- r-pheatmap
+- r-snowfall=1.84_6.1
+- r-rmarkdown #=2.5
+- r-venndiagram #=1.6.20
+- r-xlsx=0.6.5
+
+  ## others
+- pandoc=2.11.2
