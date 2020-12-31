@@ -57,13 +57,12 @@ library(tidyr)
 # Pre-processing
 In this section we prepare the tables for downstream analysis based on differential expression results.
 ```{r  eval=F}
-for(sheet in c('HC-vs-Mild','HC-vs-Severe','Mild-vs-Severe')){
-  temp=read.xlsx(paste0(data_dir,'Diff_Exp_Result.xlsx'), sheetName = sheet)
-  temp_name=gsub('-','_',sheet)
-  write.table(temp, file = paste0(data_dir,'diff_exp_',temp_name,'.tsv'), sep = "\t")
+for(sheet in c('HC_vs_Mild','HC_vs_Severe','Mild_vs_Severe')){
+  temp=read.delim(paste0(data_dir,sheet,'.txt'))
+  temp=temp[!is.na(temp$log2FoldChange),] #drop NA
+  write.table(temp, file = paste0(data_dir,'diff_exp_',sheet,'.tsv'), sep = "\t", row.names = F)
 }
 ```
-
 
 
 GMT download
@@ -81,7 +80,7 @@ download.file('https://github.com/SysBioChalmers/Human-GEM/blob/master/model/Hum
 ```
 
 The following currency metabolites are disregarded from further analysis: `H2O`, `CO2`, `O2`, `H+`, `HCO3−`, `Na+`, `CoA`, `Pi`, `PPi`, `AMP`, `ADP`, `ATP`, `NAD+`, `NADH`, `NADP+`, `NADPH`, `PAP`, `PAPS`, `FAD,` and `FADH2.`
-```{r}
+```{r }
 ## create metabolite:gene, metabolite:subsystem and gene:subsystem
 dat=read.xlsx(paste0(data_dir, 'human_gem.xlsx'), sheetIndex = 1)[,c('EQUATION','GENE.ASSOCIATION','SUBSYSTEM')]
 dat=dat %>% separate_rows(., EQUATION, sep = ' \\+ | <=> | => ')
@@ -122,6 +121,17 @@ ens2gene=read.delim(paste0(data_dir, 'proteinatlas.tsv'))[,c('Ensembl','Gene')]
 rownames(ens2gene)=ens2gene$Ensembl
 ens2gene=ens2gene['Gene']
 ```
+
+# Mean expression
+```{r}
+tpm=read.delim(paste0(data_dir, 'TPM_Mean.txt'))
+#drop low expressed genes
+# tpm=tpm[rowSums(tpm[,c('HC','Mild','Severe')])<3,c('Name','HC','Mild','Severe')]
+tpm=tpm[,c('Name','HC','Mild','Severe')]
+
+write.table(tpm, paste0(results_dir,'tpm_mean_expressed.txt'), sep = "\t", row.names = F)
+```
+
 
 
 # Enrichment analysis
@@ -210,7 +220,7 @@ run_piano(pro_hc_mild, model_gmt, nPerm = 10000, save_path = paste0(results_dir,
 run_piano(pro_hc_severe, model_gmt, nPerm = 10000, save_path = paste0(results_dir,'/piano/hc_severe_reporter.tsv'))
 run_piano(pro_mild_severe, model_gmt, nPerm = 10000, save_path = paste0(results_dir,'/piano/mild_severe_reporter.tsv'))
 
-## running TF identification
+# ## running TF identification
 run_piano(pro_hc_mild_symbols, tf_gmt, nPerm = 10000, save_path = paste0(results_dir,'/piano/hc_mild_tf.tsv'))
 run_piano(pro_hc_severe_symbols, tf_gmt, nPerm = 10000, save_path = paste0(results_dir,'/piano/hc_severe_tf.tsv'))
 run_piano(pro_mild_severe_symbols, tf_gmt, nPerm = 10000, save_path = paste0(results_dir,'/piano/mild_severe_tf.tsv'))
@@ -412,18 +422,18 @@ retrieve_genes=function(data_FDR_LFC, GMT_file, processed_piano, FDR_genes, FDR_
 
 
 ### Reporter metabolites
-**`r tab_num()` - Reporter metabolites for HC vs mild (metabolite FDR < 0.2 in at least one of the metabolite statistics) and individual genes (FDR < 0.15 was considered as differentially expressed).** Terms are shown if statistically significant for any direction. Here, "dn" and "up" indicate down-  and upregulation in mild, respectively. Column names indicate FDR whenever  has been used to filter genes. Genes are presented with respective directions if statistically significant. 
+**`r tab_num()` - Reporter metabolites for HC vs mild (metabolite FDR < 0.1 in at least one of the metabolite statistics) and individual genes (FDR < 0.15 was considered as differentially expressed).** Terms are shown if statistically significant for any direction. Here, "dn" and "up" indicate down-  and upregulation in mild, respectively. Column names indicate FDR whenever  has been used to filter genes. Genes are presented with respective directions if statistically significant. 
 ```{r}
-retrieve_genes(pro_hc_mild_FDR,  model_gmt, hc_mild_reporter, 0.05, 0.2) %>% arrange(desc(num_genes_FDR0.05)) %>% DT::datatable(., filter = "top", rownames = F) %>% DT::formatStyle(columns = seq(1,300), fontSize='85%')
+retrieve_genes(pro_hc_mild_FDR,  model_gmt, hc_mild_reporter, 0.05, 0.1) %>% arrange(desc(num_genes_FDR0.05)) %>% DT::datatable(., filter = "top", rownames = F) %>% DT::formatStyle(columns = seq(1,300), fontSize='85%')
 ```
-**`r tab_num()` - Reporter metabolites for HC vs severe (metabolite FDR < 0.2 in at least one of the metabolite statistics) and individual genes (FDR < 0.15 was considered as differentially expressed).** Terms are shown if statistically significant for any direction. Here, "dn" and "up" indicate down-  and upregulation in mild, respectively. Column names indicate FDR whenever  has been used to filter genes. Genes are presented with respective directions if statistically significant. 
+**`r tab_num()` - Reporter metabolites for HC vs severe (metabolite FDR < 0.1 in at least one of the metabolite statistics) and individual genes (FDR < 0.15 was considered as differentially expressed).** Terms are shown if statistically significant for any direction. Here, "dn" and "up" indicate down-  and upregulation in mild, respectively. Column names indicate FDR whenever  has been used to filter genes. Genes are presented with respective directions if statistically significant. 
 ```{r}
-retrieve_genes(pro_hc_severe_FDR, model_gmt, hc_severe_reporter, 0.05, 0.2) %>% arrange(desc(num_genes_FDR0.05)) %>% DT::datatable(., filter = "top", rownames = F) %>% DT::formatStyle(columns = seq(1,300), fontSize='85%')
+retrieve_genes(pro_hc_severe_FDR, model_gmt, hc_severe_reporter, 0.05, 0.1) %>% arrange(desc(num_genes_FDR0.05)) %>% DT::datatable(., filter = "top", rownames = F) %>% DT::formatStyle(columns = seq(1,300), fontSize='85%')
 ```
 
-**`r tab_num()` - Reporter metabolites for mild vs severe (metabolite FDR < 0.2 in at least one of the metabolite statistics) and individual genes (FDR < 0.15 was considered as differentially expressed).** Terms are shown if statistically significant for any direction. Here, "dn" and "up" indicate down-  and upregulation in mild, respectively. Column names indicate FDR whenever  has been used to filter genes. Genes are presented with respective directions if statistically significant. 
+**`r tab_num()` - Reporter metabolites for mild vs severe (metabolite FDR < 0.1 in at least one of the metabolite statistics) and individual genes (FDR < 0.15 was considered as differentially expressed).** Terms are shown if statistically significant for any direction. Here, "dn" and "up" indicate down-  and upregulation in mild, respectively. Column names indicate FDR whenever  has been used to filter genes. Genes are presented with respective directions if statistically significant. 
 ```{r}
-retrieve_genes(pro_mild_severe_FDR, model_gmt, mild_severe_reporter, 0.05, 0.2) %>% arrange(desc(num_genes_FDR0.05)) %>% DT::datatable(., filter = "top", rownames = F) %>% DT::formatStyle(columns = seq(1,300), fontSize='85%')
+retrieve_genes(pro_mild_severe_FDR, model_gmt, mild_severe_reporter, 0.05, 0.1) %>% arrange(desc(num_genes_FDR0.05)) %>% DT::datatable(., filter = "top", rownames = F) %>% DT::formatStyle(columns = seq(1,300), fontSize='85%')
 ```
 
 Looking for mets with common directions from HC > Mild > Severe. We use only the tables for HC vs mild, and mild vs severe.
@@ -496,7 +506,7 @@ reporter_alterations=function(how='dist', FDR_thr=0.05, output='heatmap', log10_
     return(both)  
   }
 }
-reporter_alterations(FDR_thr = 0.2)
+reporter_alterations(FDR_thr = 0.25)
 
 ```
 
@@ -513,7 +523,7 @@ networkPlot2(
   hc_mild_gsaRES, geneSets = mets_of_interest,
   class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Key reporter mets (HC vs Mild)')
 networkPlot2(
-  hc_mild_gsaRES, significance = 0.05, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Reporter mets FDR < 0.05 (HC vs Mild)')
+  hc_mild_gsaRES, significance = 0.1, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Reporter mets FDR < 0.1 (HC vs Mild)')
 ```
 **`r fig_num()` - Reporter metabolites for HC vs Mild.**. Edges represent >30% genes overlapping between terms.
 
@@ -523,7 +533,7 @@ networkPlot2(
   mild_severe_gsaRES, geneSets = mets_of_interest,
   class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Key reporter mets (Mild vs Severe)')
 networkPlot2(
-  mild_severe_gsaRES, significance = 0.2, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Reporter mets FDR < 0.2 (HC vs Mild)')
+  mild_severe_gsaRES, significance = 0.1, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Reporter mets FDR < 0.1 (HC vs Mild)')
 ```
 **`r fig_num()` - Reporter metabolites for Mild vs Severe.**. Edges represent >30% genes overlapping between terms.
 
@@ -532,7 +542,7 @@ networkPlot2(
   hc_severe_gsaRES, geneSets = mets_of_interest,
   class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Key reporter mets (Mild vs Severe)')
 networkPlot2(
-  hc_severe_gsaRES, significance = 0.05, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Reporter mets FDR < 0.05 (HC vs Severe)')
+  hc_severe_gsaRES, significance = 0.1, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Reporter mets FDR < 0.1 (HC vs Severe)')
 ```
 **`r fig_num()` - Reporter metabolites for HC vs Severe.**. Edges represent >30% genes overlapping between terms.
 
@@ -559,7 +569,7 @@ networkPlot2(
 networkPlot2(
   hc_severe_gsaRES, significance = 0.05, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='TFs FDR < 0.05 (HC vs Severe)')
 ```
-**`r fig_num()` - Transcription factor relationships based on genes in common for all 3 comparisons (FDR < 0.05 for TF significance).**. Edges represent >30% genes overlapping between terms.
+**`r fig_num()` - Transcription factor relationships based on genes in common for all 3 comparisons (FDR < 0.05 for TF significance).**. Edges represent >30% genes overlapping between terms. Red and blue respectively indicate TFs with associated up- and downregulated genes. 
 
 
 
@@ -622,6 +632,7 @@ build_TF_networks=function(diff_exp_result, gsea_result, FDR_thr_term=0.01, FDR_
 # cat(htmltools::includeHTML(paste0(results_dir,'piano/hc_mild.html'))) ### render the html
 print('Figure not rendered due to high edge number')
 ```
+   
 **`r fig_num()` - TF and respective co-regulated Genes.**. Up- and downregulated genes (red and blue, respectively, FDR < 0.15) and respective TFs (black) are displayed. Only TFs that showed statistically significant associations in `r tab_num_prev()` are presented.
 
 
