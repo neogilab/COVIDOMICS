@@ -414,7 +414,7 @@ retrieve_genes=function(data_FDR_LFC, GMT_file, processed_piano, FDR_genes, FDR_
 ### Reporter metabolites
 **`r tab_num()` - Reporter metabolites for HC vs mild (metabolite FDR < 0.2 in at least one of the metabolite statistics) and individual genes (FDR < 0.15 was considered as differentially expressed).** Terms are shown if statistically significant for any direction. Here, "dn" and "up" indicate down-  and upregulation in mild, respectively. Column names indicate FDR whenever  has been used to filter genes. Genes are presented with respective directions if statistically significant. 
 ```{r}
-retrieve_genes(pro_hc_mild_symbols_FDR, tf_gmt, hc_mild_tf, 0.05, 0.2) %>% arrange(desc(num_genes_FDR0.05)) %>% DT::datatable(., filter = "top", rownames = F) %>% DT::formatStyle(columns = seq(1,300), fontSize='85%')
+retrieve_genes(pro_hc_mild_FDR,  model_gmt, hc_mild_reporter, 0.05, 0.2) %>% arrange(desc(num_genes_FDR0.05)) %>% DT::datatable(., filter = "top", rownames = F) %>% DT::formatStyle(columns = seq(1,300), fontSize='85%')
 ```
 **`r tab_num()` - Reporter metabolites for HC vs severe (metabolite FDR < 0.2 in at least one of the metabolite statistics) and individual genes (FDR < 0.15 was considered as differentially expressed).** Terms are shown if statistically significant for any direction. Here, "dn" and "up" indicate down-  and upregulation in mild, respectively. Column names indicate FDR whenever  has been used to filter genes. Genes are presented with respective directions if statistically significant. 
 ```{r}
