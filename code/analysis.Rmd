@@ -1,0 +1,634 @@
+---
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+    html_document: 
+      code_folding: hide
+      fig_caption: yes
+      number_sections: yes
+      toc: yes
+      toc_float:
+        collapsed: yes
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r Setup, echo = FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(fig.width  = 12,
+                      fig.height = 8,
+                      results    = "asis",
+                      message    = FALSE,
+                      tidy = TRUE,
+                      warning    = FALSE, 
+                      error=TRUE
+                      )
+
+## Figs and Table numbers for captions
+fi=1; ti=1;
+fig_num=function(){ temp=fi; fi<<-fi+1; return(paste0("Figure ",temp))}
+fig_num_prev=function(){temp=fi-1; return(paste0("Fig. ",temp)) }
+fig_num_prev_n=function(n){temp=fi-n; return(paste0("Fig. ",temp)) }
+fig_num_nxt=function(){temp=fi; return(paste0("Fig. ",temp)) }
+fig_num_nxt_n=function(n){temp=fi+n; return(paste0("Fig. ",temp)) }
+tab_num=function(){ temp=ti; ti<<-ti+1; return(paste0("Table ",temp))}
+tab_num_prev=function(){temp=ti-1; return(paste0("Table ",temp)) }
+tab_num_nxt=function(){temp=ti; return(paste0("Table ",temp)) }
+
+## Paths
+main_dir=gsub('/code','',getwd())
+code_dir=paste0(main_dir,'/code/')
+results_dir=paste0(main_dir,'/results/')
+data_dir=paste0(main_dir,'/data/')
+
+## Preamble
+library(RColorBrewer)
+library(ggplot2)
+library(igraph)
+library(pheatmap)
+library(piano)
+library(snowfall)
+library(VennDiagram)
+library(rsbml)
+library(dplyr)
+library(xlsx)
+library(visNetwork)
+library(tidyr)
+```
+
+# Pre-processing
+In this section we prepare the tables for downstream analysis based on differential expression results.
+```{r  eval=F}
+for(sheet in c('HC-vs-Mild','HC-vs-Severe','Mild-vs-Severe')){
+  temp=read.xlsx(paste0(data_dir,'Diff_Exp_Result.xlsx'), sheetName = sheet)
+  temp_name=gsub('-','_',sheet)
+  write.table(temp, file = paste0(data_dir,'diff_exp_',temp_name,'.tsv'), sep = "\t")
+}
+```
+
+
+
+GMT download
+```{r eval=F}
+##################
+# ONLY RAN ONCE! #
+# takes long     #
+##################
+
+## retrieve gmt files
+download.file('https://maayanlab.cloud/Enrichr/geneSetLibrary?mode=text&libraryName=TRANSFAC_and_JASPAR_PWMs', destfile = "../data/transfac_tfs_2019.gmt", method = "wget") #TFs
+
+## Model download
+download.file('https://github.com/SysBioChalmers/Human-GEM/blob/master/model/Human-GEM.xlsx?raw=true', destfile = "../data/human_gem.xlsx", method="wget")
+```
+
+The following currency metabolites are disregarded from further analysis: `H2O`, `CO2`, `O2`, `H+`, `HCO3−`, `Na+`, `CoA`, `Pi`, `PPi`, `AMP`, `ADP`, `ATP`, `NAD+`, `NADH`, `NADP+`, `NADPH`, `PAP`, `PAPS`, `FAD,` and `FADH2.`
+```{r}
+## create metabolite:gene, metabolite:subsystem and gene:subsystem
+dat=read.xlsx(paste0(data_dir, 'human_gem.xlsx'), sheetIndex = 1)[,c('EQUATION','GENE.ASSOCIATION','SUBSYSTEM')]
+dat=dat %>% separate_rows(., EQUATION, sep = ' \\+ | <=> | => ')
+dat=dat %>% separate_rows(., GENE.ASSOCIATION, sep = " or | and ")
+
+### stoichiometries are ignored
+dat$EQUATION=gsub('^\\d+\\s|^\\d+\\.\\d+\\s','',dat$EQUATION)
+
+### dropping currency metabolites
+mets_to_exclude='H2O\\[|CO2\\[|O2\\[|H\\+\\[|HCO3\\−\\[|Na\\+\\[|CoA\\[|Pi\\[|PPi\\[|AMP\\[|ADP\\[|ATP\\[|NAD\\+\\[|NADH\\[|NADP\\+\\[|NADPH\\[|PAP\\[|PAPS\\[|FAD\\[|FADH2\\['
+
+dat=dat[!grepl(mets_to_exclude, dat$EQUATION),]
+
+### reactions with no genes
+dat=dat[!is.na(dat$GENE.ASSOCIATION),]
+dat=unique(dat)
+colnames(dat)=c('metabolite','gene','subsystem')
+
+gene2met=unique(dat[, c('gene','metabolite')])
+subsystem2met=unique(dat[, c('subsystem','metabolite')])
+subsystem2gene=unique(dat[, c('subsystem','gene')])
+
+saveRDS(dat, paste0(results_dir, 'met2gene2subsystem.RDS'))
+saveRDS(gene2met, paste0(results_dir, 'gene2met.RDS'))
+saveRDS(subsystem2met, paste0(results_dir, 'subsystem2met.RDS'))
+saveRDS(subsystem2gene, paste0(results_dir, 'subsystem2gene.RDS'))
+
+model_gmt=loadGSC(gene2met)
+saveRDS(model_gmt,  paste0(results_dir, 'metabolites2gene_gmt.RDS'))
+```
+
+We use the following file to  convert between Ensembl and Gene symbols
+```{r}
+## downloaded from
+# https://www.proteinatlas.org/download/proteinatlas.tsv.zip
+
+ens2gene=read.delim(paste0(data_dir, 'proteinatlas.tsv'))[,c('Ensembl','Gene')]
+rownames(ens2gene)=ens2gene$Ensembl
+ens2gene=ens2gene['Gene']
+```
+
+
+# Enrichment analysis
+In this section we perform enrichment analyses [through PIANO](https://bioconductor.org/packages/release/bioc/html/piano.html). We use KEGG, GO Biological Processes, and Reactome through [Enrichr](https://maayanlab.cloud/Enrichr/#stats). PIANO is run based on LFC and P values of individual genes, and genes are resampled 10,000 times for each rep. Note that PIANO gives us 3 types of metrics: *non-directional* (dysregulated pathways regardless of gene directionality), *mixed-directional* (terms whose genes are significantly affected by either or both up- and downregulation; may be mixed directional up and down if contains two subsets of genes that are coordinately regulated in opposite directions); *distinct directional* (terms consistently up- or downregulated, but not both). More information can be found [in the original publication](https://academic.oup.com/nar/article/41/8/4378/2408999). 
+While we intuitively are usually interested in consistent up/downregulation of the entire gene set, we may also find that many of the genes found in a gene set are substantially up/downregulated, but not enough to drive the entire term in that direction, which may be nevertheless biologically significant. This may be the case of gene sets where few signaling transducers are statistically up/downregulated, but other genes in the gene set are not.
+
+```{r}
+## load gmt files
+tf_gmt=loadGSC(paste0(data_dir,'transfac_tfs_2019.gmt'))
+# drops "mouse" terms
+regex_to_exclude='mouse'
+remove_from_gmt=function(gmt_input){
+  gmt_out=gmt_input
+  all_names=names(gmt_input$gsc)
+  out=all_names[grepl(regex_to_exclude, all_names, perl = T, ignore.case = T)]
+  gmt_out$gsc=within(gmt_out$gsc, rm(list=out))
+  
+  names(tf_gmt$gsc)=gsub(' \\(human\\)','',names(tf_gmt$gsc), perl = T)    
+  return(gmt_out)
+}
+tf_gmt=remove_from_gmt(tf_gmt)
+
+
+model_gmt=readRDS(paste0(results_dir, 'metabolites2gene_gmt.RDS'))
+
+## gene data with P values
+hc_mild=read.delim(paste0(data_dir,'diff_exp_HC_vs_Mild.tsv'))
+hc_severe=read.delim(paste0(data_dir,'diff_exp_HC_vs_Severe.tsv'))
+mild_severe=read.delim(paste0(data_dir,'diff_exp_Mild_vs_Severe.tsv'))
+
+#' prepares data for enrichment analysis
+prepare_enrichment=function(input_df){
+  temp=input_df
+  temp=temp%>% rename(., id=ID, LFC=log2FoldChange, P=pvalue, gene=GeneName, FDR=padj)
+  return(temp)
+}
+
+pro_hc_mild=prepare_enrichment(hc_mild)[, c('id','LFC','P')]
+pro_hc_severe=prepare_enrichment(hc_severe)[, c('id','LFC','P')]
+pro_mild_severe=prepare_enrichment(mild_severe)[, c('id','LFC','P')]
+
+pro_hc_mild_symbols=prepare_enrichment(hc_mild)[, c('gene','LFC','P')] %>% rename(., id=gene)
+pro_hc_severe_symbols=prepare_enrichment(hc_severe)[, c('gene','LFC','P')]%>% rename(., id=gene)
+pro_mild_severe_symbols=prepare_enrichment(mild_severe)[, c('gene','LFC','P')]%>% rename(., id=gene)
+
+pro_hc_mild_FDR=prepare_enrichment(hc_mild)[, c('id','LFC','FDR')]
+pro_hc_severe_FDR=prepare_enrichment(hc_severe)[, c('id','LFC','FDR')]
+pro_mild_severe_FDR=prepare_enrichment(mild_severe)[, c('id','LFC','FDR')]
+
+pro_hc_mild_symbols_FDR=prepare_enrichment(hc_mild)[, c('gene','LFC','FDR')] %>% rename(., id=gene)
+pro_hc_severe_symbols_FDR=prepare_enrichment(hc_severe)[, c('gene','LFC','FDR')]%>% rename(., id=gene)
+pro_mild_severe_symbols_FDR=prepare_enrichment(mild_severe)[, c('gene','LFC','FDR')]%>% rename(., id=gene)
+
+```
+
+
+```{r eval=F, message=F}
+#### DO NOT RUN
+# Not ran when generating html report
+#
+#' Prepares data and runs PIANO. Always saves .RDS object.
+#'
+#' @param input_data        dataframe with id, LFC and P values
+#' @param gmt               the gsc file, from loadGSC
+#' @param min_gsSize        int. minimum number of genes per term to consider
+#' @param nPerm             int. number of permutations for gene-level sampling
+#' @param save_path         string. Output file path for .tsv
+#' @param ncpus             number of CPUs to use. nPerm/ncpus should be integer
+#' @param reporter          method to use. See PIANO paper
+run_piano=function(input_data, gmt, min_gsSize=2, nPerm=10000, save_path='.', ncpus=5, method='reporter'){
+  if(!grepl('\\.tsv',save_path)){
+    stop('save_path must be a .tsv file. stopping...')
+  }
+  myP=setNames(input_data$P, input_data$id)
+  myLFC=setNames(input_data$LFC, input_data$id)
+  
+  piano=runGSA(geneLevelStats = myP, directions = myLFC, gsc = gmt, geneSetStat = method, gsSizeLim = c(min_gsSize,Inf), nPerm = nPerm, ncpus = ncpus)
+  saveRDS(piano, file = gsub('\\.tsv$','.RDS',save_path, perl = T))
+  stats_out=GSAsummaryTable(piano, save = T, file = save_path)
+  
+  write.xlsx(stats_out, gsub('.tsv','.xlsx',save_path))
+  return(stats_out)
+}
+## running reporter metabolite analysis
+run_piano(pro_hc_mild, model_gmt, nPerm = 10000, save_path = paste0(results_dir,'/piano/hc_mild_reporter.tsv'))
+run_piano(pro_hc_severe, model_gmt, nPerm = 10000, save_path = paste0(results_dir,'/piano/hc_severe_reporter.tsv'))
+run_piano(pro_mild_severe, model_gmt, nPerm = 10000, save_path = paste0(results_dir,'/piano/mild_severe_reporter.tsv'))
+
+## running TF identification
+run_piano(pro_hc_mild_symbols, tf_gmt, nPerm = 10000, save_path = paste0(results_dir,'/piano/hc_mild_tf.tsv'))
+run_piano(pro_hc_severe_symbols, tf_gmt, nPerm = 10000, save_path = paste0(results_dir,'/piano/hc_severe_tf.tsv'))
+run_piano(pro_mild_severe_symbols, tf_gmt, nPerm = 10000, save_path = paste0(results_dir,'/piano/mild_severe_tf.tsv'))
+```
+
+
+The tables created with the full output from PIANO based on the following gene sets (all within the folder `/results/piano/`):   
+- Reporter metabolites: [hc vs mild](./results/piano/hc_mild_reportermets.tsv), [hc vs severe](./results/piano/hc_severe_reportermets.tsv), and [hc vs mild](./results/piano/mild_severe_reportermets.tsv)  
+- Transfac and Jaspar (transcription factors): [hc vs mild](./results/piano/hc_mild_TTFs.tsv), [hc vs severe](./results/piano/hc_severe_TFs.tsv), and [hc vs mild](./results/piano/mild_severe_TFs.tsv) 
+
+The results for these gene sets are further analysed in the following sections:   
+- [Reporter metabolites](#reporter-metabolites)   
+- [Transcription factor networks](#transcription-factor-networks)   
+
+
+```{r}
+#' Processes PIANO output by selecting stat.dist.up/dn and non-directional altered pathways
+#'
+#' @param category        string. one of 'hc_mild','hc_severe' or 'mild_severe'
+#' @param term            string. one of "tf", "reporter"
+#' @param FDR_thr         float. FDR threshold for filtering dataframe
+#' @param output          string. one of 'padj','genes', and 'stat'
+#' @param log10           bool. whether to convert output to -log10(val)
+process_piano=function(category=NULL, term='reporter', FDR_thr=0.05, output='padj', log10=F){
+  tdata=read.delim(paste0(results_dir,'/piano/',category,'_',term,'.tsv'), stringsAsFactors = F)
+  colnames(tdata)=gsub('_$','',gsub('\\.+','_',colnames(tdata)))
+  row.names(tdata)=tdata$Name
+  
+  #filtering
+  cols_interest=grep('dist_dir_(up|dn)|non_dir|mix',colnames(tdata), value = T)
+  padj_interest=grep('p_adj',cols_interest, value = T)
+  
+  ## some columns have NA in padj. We disregard those (i.e. FDR = 1)
+  tdata[is.na(tdata)]=999
+  subset=rowSums(tdata[,padj_interest]<FDR_thr)>0
+  
+  #dropping unnecessary cols
+  excl_cols=grepl("Name|p_dist|p_non",colnames(tdata))
+  tdata=tdata[subset,!excl_cols]
+  
+  #rename columns
+  colnames(tdata)=tolower(colnames(tdata))
+  
+  col_order=c(c('genes_tot','genes_up','genes_down'), 
+              grep('dist\\_dir\\_dn',colnames(tdata), value = T, perl=T),
+              grep('mix_dir_dn',colnames(tdata), value = T),
+              grep('non_dir',colnames(tdata), value = T),
+              grep('mix_dir_up',colnames(tdata), value = T),
+              grep('dist_dir_up',colnames(tdata), value = T))
+  tdata=tdata[,col_order]
+  
+  #output
+  if(output=='padj'){
+    out=tdata[,grep('p_adj',colnames(tdata),value=T)]
+    out[out>FDR_thr]=1
+    colnames(out)=gsub('p_adj_','',colnames(out))
+    padj_interest=gsub('p_adj_','',padj_interest)
+  } else if(output=='gene_num'){
+    out=tdata[,grep('genes',colnames(tdata),value=T)]
+  } else if(output=='stat'){
+    out=tdata[,grep('stat',colnames(tdata),value=T)]
+  } else if(output=='all'){
+    out=tdata
+  }
+
+  if(log10){
+    out=-log10(out[,padj_interest])
+  }
+  return(out)
+}
+mild_severe_reporter=process_piano(category = 'mild_severe', term='reporter', FDR_thr = 0.2, output='all')
+hc_mild_reporter=process_piano(category = 'hc_mild', term='reporter', FDR_thr = 0.2, output='all')
+hc_severe_reporter=process_piano(category = 'hc_severe', term='reporter', FDR_thr = 0.2, output='all')
+
+mild_severe_tf=process_piano(category = 'mild_severe', term='tf', FDR_thr = 0.2, output='all')
+hc_mild_tf=process_piano(category = 'hc_mild', term='tf', FDR_thr = 0.2, output='all')
+hc_severe_tf=process_piano(category = 'hc_severe', term='tf', FDR_thr = 0.2, output='all')
+
+
+## padj cols
+padj_cols= grep('p_adj',colnames(mild_severe_reporter), value = T)
+
+# filters gene terms and classes based on FDR
+#
+# gsea_df= piano output DF
+# iclass='mixed', 'non', or 'distinct'. NA returns all.
+# direction='up','down','both'. NA returns all.
+filter_non_significant=function(gsea_df,iclass=NA, direction=NA, FDR=0.05){
+  temp=gsea_df[,padj_cols]
+  if (is.na(iclass)){
+    tclass=''
+  } else if(iclass=='mixed'){
+    tclass='mix'
+  } else if (iclass=='distinct'){
+    tclass='dist'
+  } else if (iclass=='non') {
+    tclass='non'
+  }
+  
+  temp=temp[,grep(paste0(tclass,'_dir'),colnames(temp))]
+  
+  if(is.na(direction)){
+    tdirection=''
+  } else if(direction=='down'){
+    tdirection='dn'
+  } else if(direction=='up') {
+    tdirection='up'
+  } else if(direction=='both') {
+    tdirection='up|dn'
+  }
+  
+  if(typeof(temp)=="double"){
+    out=gsea_df[temp<FDR,]
+  } else{
+    out=gsea_df[rowSums(temp[grep(tdirection,colnames(temp), value = T)]<FDR)>0,]
+  }
+  
+  
+  ### drop 'stat' and 'p' cols
+  out=out[,c('genes_tot','genes_up','genes_down',grep('p_adj',colnames(out), value = T))]
+  
+  ### sorting by padj
+  out=out[order(out$p_adj_dist_dir_dn),]
+
+  return(out)
+}
+
+#' Parses a gmt file and returns a dataframe with a list of differentially expressed mets and their associated pathways
+#' this is similar to the function `filter_non_significant` but also outputs genes
+#'
+#' @param data_FDR_LFC              dataframe. with LFC and FDR.
+#' @param GMT_file                  named list. loaded with loadGSC. 
+#' @param processed_piano           dataframe. the output from `process_piano`. 
+#' @param FDR_genes                 float. FDR threshold for filtering genes
+#' @param FDR_pathways              float. FDR threshold for filtering pathways
+retrieve_genes=function(data_FDR_LFC, GMT_file, processed_piano, FDR_genes, FDR_pathways){
+  idata=data_FDR_LFC
+  igmt=GMT_file
+  
+  #filter genes
+  idata=idata[idata$FDR<FDR_genes,]
+  up_genes=idata$id[idata$LFC>0]
+  dn_genes=idata$id[idata$LFC<0]
+  
+  #filter pathways
+  ipiano=filter_non_significant(processed_piano, iclass = NA, direction = NA, FDR = FDR_pathways)
+  
+  ipiano$pathway=rownames(ipiano)
+  pathways=ipiano$pathway
+  
+  #col names
+  FDRcolnames=c(paste0('num_genes_FDR',FDR_genes),paste0('num_genes_dn_FDR',FDR_genes),paste0('num_genes_up_FDR',FDR_genes)
+                # ,paste0('genes_dn_FDR',FDR_genes), paste0('genes_up_FDR',FDR_genes)
+                )
+  
+  # check if vars are ENSG or symbol
+  if(any(grepl('ENSG',data_FDR_LFC$id))){
+    vartype='ens'
+  } else {
+    vartype='symbol'
+  }
+  
+  #process gmt
+  gene_dirs=data.frame()
+  for(pathway in pathways){
+    temp_genes=igmt$gsc[[pathway]]
+
+    up_temp_genes=temp_genes[temp_genes%in%up_genes]
+    dn_temp_genes=temp_genes[temp_genes%in%dn_genes]
+
+    ### for ensemble ids, they are replaced with symbols
+    if(vartype=='ens'){
+      up_temp_genes=ens2gene[up_temp_genes,'Gene']
+      dn_temp_genes=ens2gene[dn_temp_genes,'Gene']
+    }
+
+    out=list(pathway, length(temp_genes[temp_genes %in% idata$id]), length(dn_temp_genes), length(up_temp_genes)
+             #, paste(dn_temp_genes, collapse = ' '), paste(up_temp_genes, collapse = ' ')
+             )
+    names(out)=c('pathway',FDRcolnames)
+
+    gene_dirs=rbind(gene_dirs, out)
+  }
+
+  ipiano=merge(ipiano, gene_dirs, all=T, by.y='pathway')
+
+  ## add compartment
+  ipiano$cell_compartment=gsub('.+\\[(\\w)\\]','\\1',ipiano$pathway, perl = T)
+  comp_list=list('s'='extracellular','p'='peroxisome', 'm'='mitochondria','c'='cytosol', 'l'='lysosome', 'r'='endoplasmic_reticulum', 'g'='golgi', 'n'='nucleus', 'i'='inner_mitochondria')
+  ipiano$cell_compartment=sapply(ipiano$cell_compartment, FUN=function(x){as.character(comp_list[x])})
+  ipiano=ipiano %>% rename(term=pathway)
+  ipiano=ipiano[, c('term','cell_compartment', FDRcolnames, colnames(ipiano)[!colnames(ipiano) %in% c('cell_compartment','term',FDRcolnames)])]
+
+  return(ipiano)
+}
+```
+
+
+
+
+### Reporter metabolites
+**`r tab_num()` - Reporter metabolites for HC vs mild (metabolite FDR < 0.2 in at least one of the metabolite statistics) and individual genes (FDR < 0.15 was considered as differentially expressed).** Terms are shown if statistically significant for any direction. Here, "dn" and "up" indicate down-  and upregulation in mild, respectively. Column names indicate FDR whenever  has been used to filter genes. Genes are presented with respective directions if statistically significant. 
+```{r}
+retrieve_genes(pro_hc_mild_symbols_FDR, tf_gmt, hc_mild_tf, 0.05, 0.2) %>% arrange(desc(num_genes_FDR0.05)) %>% DT::datatable(., filter = "top", rownames = F) %>% DT::formatStyle(columns = seq(1,300), fontSize='85%')
+```
+**`r tab_num()` - Reporter metabolites for HC vs severe (metabolite FDR < 0.2 in at least one of the metabolite statistics) and individual genes (FDR < 0.15 was considered as differentially expressed).** Terms are shown if statistically significant for any direction. Here, "dn" and "up" indicate down-  and upregulation in mild, respectively. Column names indicate FDR whenever  has been used to filter genes. Genes are presented with respective directions if statistically significant. 
+```{r}
+retrieve_genes(pro_hc_severe_FDR, model_gmt, hc_severe_reporter, 0.05, 0.2) %>% arrange(desc(num_genes_FDR0.05)) %>% DT::datatable(., filter = "top", rownames = F) %>% DT::formatStyle(columns = seq(1,300), fontSize='85%')
+```
+
+**`r tab_num()` - Reporter metabolites for mild vs severe (metabolite FDR < 0.2 in at least one of the metabolite statistics) and individual genes (FDR < 0.15 was considered as differentially expressed).** Terms are shown if statistically significant for any direction. Here, "dn" and "up" indicate down-  and upregulation in mild, respectively. Column names indicate FDR whenever  has been used to filter genes. Genes are presented with respective directions if statistically significant. 
+```{r}
+retrieve_genes(pro_mild_severe_FDR, model_gmt, mild_severe_reporter, 0.05, 0.2) %>% arrange(desc(num_genes_FDR0.05)) %>% DT::datatable(., filter = "top", rownames = F) %>% DT::formatStyle(columns = seq(1,300), fontSize='85%')
+```
+
+Looking for mets with common directions from HC > Mild > Severe. We use only the tables for HC vs mild, and mild vs severe.
+```{r}
+### finding mets that are reporter throughout
+#
+#' @param how               str. one of 'dist' or 'non', for distinct dir or non-directional
+#' @param FDR_thr           float. FDR threshold for all
+#' @param output            str. 'heatmap' or 'data'
+#' @param log10_data        bool. Whether to return log10(FDR)             
+reporter_alterations=function(how='dist', FDR_thr=0.05, output='heatmap', log10_FDR=T){
+  if(how=='dist'){
+    padj_cols=c('p_adj_dist_dir_dn','p_adj_dist_dir_up')  
+    new_cols=c('padj_dist_dn', 'padj_dist_up')
+  } else {
+    padj_cols=c('p_adj_non_dir')
+    new_cols=c('padj_non_dir')
+  }
+  ## extracting mets with common directions in both hc_vs_mild and mild_vs_severe
+  hc_mild_padj=hc_mild_reporter[rowSums(hc_mild_reporter[, padj_cols]<FDR_thr)>0,]
+  mild_severe_padj=mild_severe_reporter[rowSums(mild_severe_reporter[, padj_cols]<FDR_thr)>0,]
+  
+  # mets in common
+  common_mets=intersect(rownames(hc_mild_padj), rownames(mild_severe_padj))
+  hc_mild_padj=hc_mild_padj[common_mets,padj_cols]
+  colnames(hc_mild_padj)=paste0('hc_mild_',new_cols)
+  
+  mild_severe_padj=mild_severe_padj[common_mets,padj_cols] 
+  colnames(mild_severe_padj)=paste0('mild_severe_',new_cols)
+  
+  # subset by mets with common directions
+  temp=hc_mild_padj
+  temp[(hc_mild_padj>FDR_thr)|(mild_severe_padj>FDR_thr)]=NA
+  mets_keep=rownames(temp)[rowSums(!is.na(temp))>0]
+  
+  # both DFs
+  both=merge(hc_mild_padj, mild_severe_padj, all = T, by="row.names")
+  rownames(both)=both$Row.names
+  both=both[mets_keep, colnames(both)!='Row.names']
+  
+  # log results
+  if(log10_FDR){
+    both=log10(both)  
+  }
+  
+  if(output=='heatmap'){
+    bk1 = seq(-1, log10(FDR_thr), by = 0.01)
+    bk2 = seq(log10(FDR_thr), max(both), by = 0.01)
+    bk <- c(bk1, bk2)
+    
+    my_palette <- c(c(colorRampPalette(colors = c("white", 
+        "black"))(n = length(bk1))), rep("black", length(bk2)))
+    
+    # Generate annotations for rows and columns
+    annotation_col = data.frame(
+      comparison=factor(c(rep('HC vs mild',ncol(both)/2),rep('Mild vs Severe',ncol(both)/2))),
+      direction=factor(rep(c('down','up'),2))
+      )
+    rownames(annotation_col) = colnames(both)
+    annotation_row=subsystem2met[subsystem2met$metabolite %in% row.names(both),]
+    annotation_row=annotation_row %>%  group_by(metabolite) %>%  mutate(subsystem = paste0(subsystem, collapse = " | "))  %>% unique(.) %>% as.matrix()
+    rownames(annotation_row)=annotation_row[,'metabolite']
+    annotation_row=data.frame(subsystem=as.factor(annotation_row[,'subsystem']))
+    
+    pheatmap(both, cluster_cols = F, border_color = NA, color = my_palette, breaks = bk, 
+        fontsize_row = 8, annotation_col = annotation_col, 
+        main=paste0('Log10(FDR) reporter metabolites (FDR<',FDR_thr,')')
+        )
+  } else {
+    return(both)  
+  }
+}
+reporter_alterations(FDR_thr = 0.2)
+
+```
+
+```{r}
+mets_of_interest=row.names(reporter_alterations(FDR_thr = 0.15, output = 'data'))
+hc_mild_gsaRES=readRDS(paste0(results_dir,'/piano/hc_mild_reporter.RDS'))
+mild_severe_gsaRES=readRDS(paste0(results_dir,'/piano/mild_severe_reporter.RDS'))
+hc_severe_gsaRES=readRDS(paste0(results_dir,'/piano/hc_severe_reporter.RDS'))
+```
+
+
+```{r}
+networkPlot2(
+  hc_mild_gsaRES, geneSets = mets_of_interest,
+  class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Key reporter mets (HC vs Mild)')
+networkPlot2(
+  hc_mild_gsaRES, significance = 0.05, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Reporter mets FDR < 0.05 (HC vs Mild)')
+```
+**`r fig_num()` - Reporter metabolites for HC vs Mild.**. Edges represent >30% genes overlapping between terms.
+
+
+```{r}
+networkPlot2(
+  mild_severe_gsaRES, geneSets = mets_of_interest,
+  class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Key reporter mets (Mild vs Severe)')
+networkPlot2(
+  mild_severe_gsaRES, significance = 0.2, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Reporter mets FDR < 0.2 (HC vs Mild)')
+```
+**`r fig_num()` - Reporter metabolites for Mild vs Severe.**. Edges represent >30% genes overlapping between terms.
+
+```{r}
+networkPlot2(
+  hc_severe_gsaRES, geneSets = mets_of_interest,
+  class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Key reporter mets (Mild vs Severe)')
+networkPlot2(
+  hc_severe_gsaRES, significance = 0.05, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='Reporter mets FDR < 0.05 (HC vs Severe)')
+```
+**`r fig_num()` - Reporter metabolites for HC vs Severe.**. Edges represent >30% genes overlapping between terms.
+
+
+
+### Transcription factor networks (under development)
+
+**`r tab_num()` - TFs associated output terms associated with differentially expressed genes HC vs Mild (term FDR < 0.01 in at least one of the term statistics) and genes (FDR < 0.01 considered as differentially expressed).** TFs are shown if statistically significant for any direction. Here, "dn" and "up" indicate down-  and upregulation in TGFlow, respectively. Column names indicate FDR whenever  has been used to filter genes. Genes are presented with respective directions if statistically significant.
+
+```{r}
+retrieve_genes(pro_hc_mild_symbols_FDR, tf_gmt, hc_mild_tf, 0.01, 0.001) %>% arrange(desc(num_genes_FDR0.01)) %>% DT::datatable(., filter = "top", rownames = F) %>% DT::formatStyle(columns = seq(1,300), fontSize='85%')
+```
+
+
+```{r}
+hc_mild_gsaRES=readRDS(paste0(results_dir,'/piano/hc_mild_tf.RDS'))
+mild_severe_gsaRES=readRDS(paste0(results_dir,'/piano/mild_severe_tf.RDS'))
+hc_severe_gsaRES=readRDS(paste0(results_dir,'/piano/hc_severe_tf.RDS'))
+
+networkPlot2(
+  hc_mild_gsaRES, significance = 0.05, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='TFs FDR < 0.05 (HC vs Mild)')
+networkPlot2(
+  mild_severe_gsaRES, significance = 0.05, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='TFs FDR < 0.05 (Mild vs Severe)')
+networkPlot2(
+  hc_severe_gsaRES, significance = 0.05, class="dist", direction = 'both',  physics=F, lay='layout_with_kk', overlap=0.3, main='TFs FDR < 0.05 (HC vs Severe)')
+```
+**`r fig_num()` - Transcription factor relationships based on genes in common for all 3 comparisons (FDR < 0.05 for TF significance).**. Edges represent >30% genes overlapping between terms.
+
+
+
+```{r eval=T, message=F, warning=F}
+build_TF_networks=function(diff_exp_result, gsea_result, FDR_thr_term=0.01, FDR_thr_genes=0.05, file_out='TF_network.html'){
+  ## melting DF
+  temp=retrieve_genes(diff_exp_result, tf_gmt, gsea_result, FDR_thr_genes, FDR_thr_term)
+  cols=grep('term|^genes\\_up\\_|^genes\\_dn\\_',colnames(temp), perl = T, value = T)
+  col_up=grep('up',cols,perl=T, value=T)
+  col_dn=grep('dn',cols,perl=T, value=T)
+  
+  temp=temp[,cols] %>% dplyr::rename('TF'='term') %>% mutate(TF=gsub('\\s\\(human\\)', '', TF, perl = T))
+  up_genes=temp[,c('TF',col_up)] %>% tidyr::separate_rows(., col_up, sep=' ') %>% dplyr::rename('node'=col_up) 
+  up_genes[,'type']='up'
+  dn_genes=temp[,c('TF',col_dn)]  %>% tidyr::separate_rows(., col_dn, sep=' ') %>% dplyr::rename('node'=col_dn)
+  dn_genes[,'type']='dn'
+  
+  ## building network
+  nodes=data.frame(node=unique(temp$TF), type='TF') %>% dplyr::bind_rows(up_genes[,c('node','type')]) %>% dplyr::bind_rows(dn_genes[,c('node','type')]) %>% dplyr::filter(., node!='') %>% dplyr::distinct()
+  
+  nodes=nodes %>%  group_by(node) %>%  mutate(type = paste0(type, collapse = "_"))  %>% unique(.) %>% as.data.frame()
+  
+  rownames(nodes)=nodes$node
+  node_type=nodes$type
+  
+  edges=rbind(up_genes,dn_genes) %>% dplyr::filter(., node!='')
+  edges=edges %>% dplyr::rename('from'=TF, 'to'=node)
+  edges$from=nodes[edges$from, 'id']
+  edges$to=nodes[edges$to, 'id']
+
+  #visual properties
+  colrs.v = c(TF = "gray", up = "salmon", dn='lightblue', TF_dn='pink', TF_dn='cyan') #node colours
+  sizes = c(TF=40, up=10, dn=10, TF_dn=40, TF_dn=40)
+
+  vis_nodes = nodes
+  vis_links = edges
+  vis_links$value=1
+
+  vis_nodes$shape  <- "dot"
+  vis_nodes$shadow <- TRUE # Nodes will drop shadow
+  vis_nodes$size= sizes[node_type]
+  vis_nodes$label  <- vis_nodes$node # Node label
+  vis_nodes$borderWidth <- 1 # Node border width
+
+  vis_nodes$color.background = colrs.v[node_type]
+  vis_nodes$color.border <- "lightgray"
+  vis_nodes$font.color='black'
+  vis_nodes$font.size=30
+
+  # g=visNetwork( nodes=vis_nodes, edges=vis_links   ) %>% visOptions(highlightNearest = TRUE, selectedBy = "type")
+  # visSave(g, file = paste0(results_dir,'piano/',file_out), background = "white") ### gives an error in pandoc but works
+  
+}
+# build_TF_networks(diff_exp_result = pro_hc_mild_symbols_FDR, FDR_thr_term = 0.001, FDR_thr_genes = 0.001, gsea_result = hc_mild_tf, file_out='hc_mild.html')
+
+```
+
+
+```{r}
+# cat(htmltools::includeHTML(paste0(results_dir,'piano/hc_mild.html'))) ### render the html
+print('Figure not rendered due to high edge number')
+```
+**`r fig_num()` - TF and respective co-regulated Genes.**. Up- and downregulated genes (red and blue, respectively, FDR < 0.15) and respective TFs (black) are displayed. Only TFs that showed statistically significant associations in `r tab_num_prev()` are presented.
+
+
+***
+
+# Session info
+
+```{r}
+sessionInfo()
+```
